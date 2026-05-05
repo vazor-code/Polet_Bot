@@ -21,8 +21,8 @@ Max-бот для регистрации пользователей образо
 1. Клонируй репозиторий и перейди в папку проекта:
 
 ```bash
-git clone <URL_репозитория>
-cd OC_POLET_BOT
+git clone [<URL_репозитория>](https://github.com/vazor-code/Polet_Bot.git)
+cd Polet_Bot
 ```
 
 2. Создай и активируй виртуальное окружение:

@@ -21,7 +21,7 @@ Max-бот для регистрации пользователей образо
 1. Клонируй репозиторий и перейди в папку проекта:
 
 ```bash
-git clone [<URL_репозитория>](https://github.com/vazor-code/Polet_Bot.git)
+git clone https://github.com/vazor-code/Polet_Bot
 cd Polet_Bot
 ```
 
@@ -44,23 +44,16 @@ source .venv/bin/activate
 3. Установи зависимости:
 
 ```bash
-pip install maxapi
+pip install maxapi python-dotenv
 ```
 
 ## Настройка
 
 Боту нужен токен в переменной окружения `MAX_BOT_TOKEN`.
 
-Windows (PowerShell, на текущую сессию):
-
-```powershell
-$env:MAX_BOT_TOKEN="твой_токен"
+В файле `.env` добавить ключ. Пример:
 ```
-
-macOS/Linux:
-
-```bash
-export MAX_BOT_TOKEN="твой_токен"
+MAX_BOT_TOKEN=ключ
 ```
 
 Если переменная не задана, бот завершится с ошибкой при старте.

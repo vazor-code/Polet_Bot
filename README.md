@@ -1,6 +1,6 @@
 # OC_POLET_BOT
 
-Max-бот для регистрации пользователей образовательного центра и хранения профилей в SQLite.
+Telegram/Max-бот для регистрации пользователей образовательного центра и хранения профилей в SQLite.
 
 ## Возможности
 
@@ -21,8 +21,8 @@ Max-бот для регистрации пользователей образо
 1. Клонируй репозиторий и перейди в папку проекта:
 
 ```bash
-git clone https://github.com/vazor-code/Polet_Bot
-cd Polet_Bot
+git clone <URL_репозитория>
+cd OC_POLET_BOT
 ```
 
 2. Создай и активируй виртуальное окружение:
@@ -44,16 +44,23 @@ source .venv/bin/activate
 3. Установи зависимости:
 
 ```bash
-pip install maxapi python-dotenv
+pip install maxapi
 ```
 
 ## Настройка
 
 Боту нужен токен в переменной окружения `MAX_BOT_TOKEN`.
 
-В файле `.env` добавить ключ. Пример:
+Windows (PowerShell, на текущую сессию):
+
+```powershell
+$env:MAX_BOT_TOKEN="твой_токен"
 ```
-MAX_BOT_TOKEN=ключ
+
+macOS/Linux:
+
+```bash
+export MAX_BOT_TOKEN="твой_токен"
 ```
 
 Если переменная не задана, бот завершится с ошибкой при старте.

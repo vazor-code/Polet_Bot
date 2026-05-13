@@ -186,7 +186,17 @@ class FlowState:
 
 
 flows: dict[int, FlowState] = {}
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
 logger = logging.getLogger("school_max_bot")
+logger.info("=== БОТ ЗАПУСКАЕТСЯ === токен_задан=%s", bool(os.getenv(MAX_BOT_TOKEN_ENV)))
 
 load_dotenv()
 
@@ -503,7 +513,8 @@ def build_services_keyboard() -> dict:
     kb = InlineKeyboardBuilder()
     for code, title in SERVICES.items():
         kb.callback(f"{SERVICE_EMOJI.get(code, EMOJI['dot'])} {code}. {title}", f"svc:{code}")
-    kb.adjust(1)
+    kb.callback(f"{EMOJI['back']} Назад в меню", "menu:back")
+    kb.adjust(1, 1)
     return kb.as_markup()
 
 
@@ -513,7 +524,8 @@ def build_staff_keyboard(staff_rows: list, staff_map: dict) -> dict:
     for idx_str, staff_id in staff_map.items():
         row = next(r for r in staff_rows if r["id"] == staff_id)
         kb.callback(f"{row['full_name']} {EMOJI['location']} {row['office']}", f"staff:{idx_str}")
-    kb.adjust(1)
+    kb.callback(f"{EMOJI['back']} Назад в меню", "menu:back")
+    kb.adjust(1, 1)
     return kb.as_markup()
 
 
@@ -523,7 +535,8 @@ def build_slots_keyboard(slots_map: dict) -> dict:
     for idx_str, slot in slots_map.items():
         slot_dt = datetime.fromisoformat(slot["start_at"])
         kb.callback(f"{EMOJI['clock']} {slot_dt.strftime('%H:%M')}", f"slot:{idx_str}")
-    kb.adjust(3)
+    kb.callback(f"{EMOJI['back']} Назад в меню", "menu:back")
+    kb.adjust(3, 1)
     return kb.as_markup()
 
 
@@ -532,7 +545,8 @@ def build_confirm_keyboard() -> dict:
     kb = InlineKeyboardBuilder()
     kb.callback(f"{EMOJI['check']} Подтвердить (YES)", "confirm:yes")
     kb.callback(f"{EMOJI['cross']} Отменить", "confirm:cancel")
-    kb.adjust(1)
+    kb.callback(f"{EMOJI['back']} Назад в меню", "menu:back")
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -939,17 +953,7 @@ async def start_handler(event):
         f"{EMOJI['school'] * 3}\n"
         f"Добро пожаловать в школьного бота!\n"
         f"{EMOJI['line'] * 15}\n\n"
-        f"{EMOJI['info']} Доступные команды:\n\n"
-        f"{EMOJI['register']} /register — регистрация\n"
-        f"{EMOJI['info']} /info — информация о школе\n"
-        f"{EMOJI['profile']} /profile — ваш профиль\n"
-        f"{EMOJI['appointment']} /appointment — запись на приём\n"
-        f"{EMOJI['my_appointments']} /my_appointments — ваши записи\n"
-        f"{EMOJI['cancel']} /cancel_appointment <id> — отмена записи\n"
-        f"{EMOJI['support']} /support — техподдержка\n"
-        f"{EMOJI['news']} /news — новости школы\n"
-        f"{EMOJI['help']} /help — справка\n\n"
-        f"{EMOJI['arrow_down']} Или используй кнопки ниже",
+        f"{EMOJI['arrow_down']} Выберите действие:",
         keyboard=build_main_menu_keyboard(),
     )
 
@@ -957,360 +961,14 @@ async def start_handler(event):
 @dispatcher.message_created(Command("help"))
 async def help_handler(event):
     logger.info("cmd_help user=%s", event.message.sender.user_id)
-    await event.message.answer(build_help_text())
+    await event.message.answer(build_help_text(), keyboard=build_back_keyboard())
 
 
 @dispatcher.message_created(Command("info"))
 async def info_handler(event):
     logger.info("cmd_info user=%s", event.message.sender.user_id)
-    await event.message.answer(build_info_text())
+    await event.message.answer(build_info_text(), keyboard=build_back_keyboard())
 
-
-# ──── Колбэк для пошаговых диалогов (выбор услуг, специалистов, времени, подтверждение) ────
-
-@dispatcher.callback_query_handler()
-async def flow_callback_handler(event):
-    """Обрабатывает инлайн-колбэки пошаговых диалогов: выбор услуги, специалиста, времени, подтверждение."""
-    payload = event.payload_text or ""
-    user_id = event.user_id
-    logger.info("flow_callback user=%s payload=%s", user_id, payload)
-
-    if not payload:
-        return
-
-    # Сначала подтверждаем колбэк
-    try:
-        await event.answer()
-    except Exception as exc:
-        logger.warning("flow_callback_answer_failed user=%s err=%s", user_id, exc)
-
-    state = flows.get(user_id)
-
-    # Выбор услуги (svc:CODE)
-    if payload.startswith("svc:") and state and state.flow == "appointment" and state.step == "service":
-        service_code = payload.split(":", 1)[1]
-        if service_code not in SERVICES:
-            await event.message.answer(f"{EMOJI['warning']} Неверная услуга.")
-            return
-
-        state.data["service"] = service_code
-        staff_rows = await run_in_thread(list_staff_for_service, service_code)
-        if not staff_rows:
-            await event.message.answer(f"{EMOJI['cross']} Нет специалистов для этой услуги.")
-            flows.pop(user_id, None)
-            return
-
-        state.data["staff_map"] = {str(i + 1): row["id"] for i, row in enumerate(staff_rows)}
-        state.step = "staff"
-        kb = build_staff_keyboard(staff_rows, state.data["staff_map"])
-        await event.message.answer(
-            f"{EMOJI['staff']} Выберите специалиста:",
-            keyboard=kb,
-        )
-        return
-
-    # Выбор специалиста (staff:NUM)
-    if payload.startswith("staff:") and state and state.flow == "appointment" and state.step == "staff":
-        idx = payload.split(":", 1)[1]
-        staff_id = state.data["staff_map"].get(idx)
-        if not staff_id:
-            await event.message.answer(f"{EMOJI['warning']} Выберите специалиста из списка.")
-            return
-
-        state.data["staff_id"] = staff_id
-        state.step = "date"
-        await event.message.answer(
-            f"{EMOJI['calendar']} Введите дату в формате YYYY-MM-DD\n"
-            f"Например: {datetime.now().strftime('%Y-%m-%d')}"
-        )
-        return
-
-    # Выбор времени (slot:NUM)
-    if payload.startswith("slot:") and state and state.flow == "appointment" and state.step == "time":
-        idx = payload.split(":", 1)[1]
-        slot = state.data["slots"].get(idx)
-        if not slot:
-            await event.message.answer(f"{EMOJI['warning']} Выберите время из списка.")
-            return
-
-        state.data["start_at"] = slot["start_at"]
-        state.data["end_at"] = slot["end_at"]
-        state.step = "purpose"
-        await event.message.answer(f"{EMOJI['name']} Опишите цель визита:")
-        return
-
-    # Подтверждение записи (confirm:yes / confirm:cancel)
-    if payload.startswith("confirm:") and state and state.flow == "appointment" and state.step == "confirm":
-        choice = payload.split(":", 1)[1]
-        if choice == "cancel":
-            flows.pop(user_id, None)
-            await event.message.answer(
-                f"{EMOJI['cross']} Запись отменена. Чтобы начать заново, используйте /appointment"
-            )
-            return
-
-        if choice == "yes":
-            ok, result = await run_in_thread(
-                create_appointment,
-                max_user_id=user_id,
-                service_code=state.data["service"],
-                staff_id=state.data["staff_id"],
-                start_at=state.data["start_at"],
-                end_at=state.data["end_at"],
-                purpose=state.data["purpose"],
-            )
-            flows.pop(user_id, None)
-            if not ok:
-                await event.message.answer(f"{EMOJI['cross']} {result}")
-                return
-            await event.message.answer(
-                f"{EMOJI['sparkles']} Запись подтверждена!\n"
-                f"Номер записи: #{result}\n"
-                f"{EMOJI['staff']} Специалист будет ожидать вас в указанное время."
-            )
-            return
-
-
-# ──── Главный обработчик меню ────
-
-@dispatcher.callback_query_handler()
-async def menu_callback_handler(event):
-    payload = event.payload_text or ""
-
-    # Пропускаем колбэки, уже обработанные flow_callback_handler
-    if payload.startswith("svc:") or payload.startswith("staff:") or payload.startswith("slot:") or payload.startswith("confirm:"):
-        return
-
-    msg_available = event.message is not None
-    logger.info(
-        "menu_callback user=%s payload=%s has_message=%s",
-        event.user_id, payload, msg_available,
-    )
-
-    # Если сообщение недоступно — обрабатываем все действия через event.answer(message={...})
-    if not msg_available:
-        logger.warning("menu_callback_no_message user=%s payload=%s — answering with new message", event.user_id, payload)
-        await _handle_menu_no_message(event, payload)
-        return
-
-    # Подтверждаем колбэк
-    try:
-        await event.answer()
-    except Exception as exc:
-        logger.warning("callback_answer_failed user=%s err=%s", event.user_id, exc)
-
-    if not payload.startswith("menu:"):
-        logger.info("menu_callback_skip user=%s payload=%s reason=not_menu", event.user_id, payload)
-        return
-
-    user_id = event.user_id
-    action = payload.split(":", 1)[1]
-    logger.info("menu_callback_action user=%s action=%s", user_id, action)
-
-    try:
-        await _execute_menu_action(event, user_id, action)
-    except Exception as exc:
-        logger.exception("menu_callback_action_failed user=%s action=%s err=%s", user_id, action, exc)
-        try:
-            await event.message.answer(f"{EMOJI['cross']} Произошла ошибка. Попробуй /start")
-        except Exception:
-            pass
-
-
-async def _handle_menu_no_message(event, payload: str):
-    """Обрабатывает все menu-действия, когда event.message is None."""
-    user_id = event.user_id
-
-    try:
-        if not payload.startswith("menu:"):
-            await event.answer(
-                notification=f"{EMOJI['warning']} Сообщение устарело.\nПожалуйста, отправь /start для нового меню."
-            )
-            return
-
-        action = payload.split(":", 1)[1]
-
-        if action == "help":
-            await event.answer(message={"text": build_help_text()})
-            logger.info("menu_direct_help user=%s", user_id)
-
-        elif action == "info":
-            await event.answer(message={"text": build_info_text()})
-            logger.info("menu_direct_info user=%s", user_id)
-
-        elif action == "profile":
-            user = await run_in_thread(get_user, user_id)
-            if not user:
-                await event.answer(message={"text": f"{EMOJI['warning']} Профиль не найден\nСначала пройдите регистрацию: /register"})
-                return
-            await event.answer(message={"text": build_profile_text(user)})
-            logger.info("menu_direct_profile user=%s", user_id)
-
-        elif action == "news":
-            rows = await run_in_thread(active_news)
-            await event.answer(message={"text": build_news_text(rows)})
-            logger.info("menu_direct_news user=%s", user_id)
-
-        elif action == "my_appointments":
-            rows = await run_in_thread(list_user_appointments, user_id)
-            await event.answer(message={"text": build_appointments_text(rows)})
-            logger.info("menu_direct_my_appointments user=%s", user_id)
-
-        elif action == "register":
-            user = await run_in_thread(get_user, user_id)
-            flows[user_id] = FlowState(flow="register", step="phone", data={"role": user["role"] if user else DEFAULT_ROLE})
-            await event.answer(message={
-                "text": (
-                    f"{EMOJI['register']} Регистрация\n"
-                    f"{EMOJI['line'] * 12}\n\n"
-                    f"Введите номер телефона в формате {PHONE_MASK}.\n"
-                    f"Если не хотите указывать телефон — отправьте - (прочерк)."
-                )
-            })
-            logger.info("menu_direct_register user=%s", user_id)
-
-        elif action == "appointment":
-            role = await run_in_thread(user_role, user_id)
-            if role == "guest":
-                await event.answer(message={
-                    "text": f"{EMOJI['warning']} Доступ ограничен\nСначала пройдите регистрацию: /register"
-                })
-                return
-            flows[user_id] = FlowState(flow="appointment", step="service")
-            await event.answer(message={
-                "text": format_service_list(),
-                "keyboard": build_services_keyboard(),
-            })
-            logger.info("menu_direct_appointment user=%s", user_id)
-
-        elif action == "support":
-            allowed = await run_in_thread(role_allowed, user_id, {"teacher"})
-            if not allowed:
-                await event.answer(message={
-                    "text": f"{EMOJI['lock']} Доступ ограничен\nТехподдержка доступна только для роли teacher"
-                })
-                return
-            flows[user_id] = FlowState(flow="support", step="category")
-            await event.answer(message={
-                "text": (
-                    f"{EMOJI['support']} Техподдержка\n"
-                    f"{EMOJI['line'] * 15}\n\n"
-                    f"FAQ:\n"
-                    f"{EMOJI['wifi']} wifi — проблемы с Wi-Fi\n"
-                    f"{EMOJI['journal']} journal — проблемы с электронным журналом\n"
-                    f"{EMOJI['printer']} printer — проблемы с принтером\n\n"
-                    f"{EMOJI['arrow_down']} Введите категорию: wifi / journal / printer / other"
-                )
-            })
-            logger.info("menu_direct_support user=%s", user_id)
-
-        elif action == "back":
-            await event.answer(message={
-                "text": f"{EMOJI['school']} Главное меню\n{EMOJI['arrow_down']} Выберите действие:",
-                "keyboard": build_main_menu_keyboard(),
-            })
-            logger.info("menu_direct_back user=%s", user_id)
-
-        else:
-            await event.answer(
-                notification=f"{EMOJI['warning']} Неизвестное действие.\nПожалуйста, отправь /start для нового меню."
-            )
-            logger.info("menu_direct_unknown user=%s action=%s", user_id, action)
-
-    except Exception as exc:
-        logger.exception("menu_no_message_failed user=%s action=%s err=%s", user_id, payload, exc)
-        try:
-            await event.answer(
-                notification=f"{EMOJI['cross']} Произошла ошибка. Попробуй /start"
-            )
-        except Exception:
-            pass
-
-
-async def _execute_menu_action(event, user_id: int, action: str):
-    """Выполняет действие меню, когда event.message доступен."""
-    if action == "register":
-        user = await run_in_thread(get_user, user_id)
-        flows[user_id] = FlowState(flow="register", step="phone", data={"role": user["role"] if user else DEFAULT_ROLE})
-        await event.message.answer(
-            f"{EMOJI['register']} Регистрация\n"
-            f"{EMOJI['line'] * 12}\n\n"
-            f"Введите номер телефона в формате {PHONE_MASK}.\n"
-            f"Если не хотите указывать телефон — отправьте - (прочерк)."
-        )
-        return
-
-    if action == "profile":
-        user = await run_in_thread(get_user, user_id)
-        if not user:
-            await event.message.answer(
-                f"{EMOJI['warning']} Профиль не найден\n"
-                f"Сначала пройдите регистрацию: /register",
-                keyboard=build_back_keyboard(),
-            )
-            return
-        await event.message.answer(build_profile_text(user), keyboard=build_back_keyboard())
-        return
-
-    if action == "appointment":
-        role = await run_in_thread(user_role, user_id)
-        if role == "guest":
-            await event.message.answer(
-                f"{EMOJI['warning']} Доступ ограничен\n"
-                f"Сначала пройдите регистрацию: /register"
-            )
-            return
-        flows[user_id] = FlowState(flow="appointment", step="service")
-        await event.message.answer(format_service_list(), keyboard=build_services_keyboard())
-        return
-
-    if action == "my_appointments":
-        rows = await run_in_thread(list_user_appointments, user_id)
-        await event.message.answer(build_appointments_text(rows), keyboard=build_back_keyboard())
-        return
-
-    if action == "news":
-        rows = await run_in_thread(active_news)
-        await event.message.answer(build_news_text(rows), keyboard=build_back_keyboard())
-        return
-
-    if action == "back":
-        await event.message.answer(
-            f"{EMOJI['school']} Главное меню\n{EMOJI['arrow_down']} Выберите действие:",
-            keyboard=build_main_menu_keyboard(),
-        )
-        return
-
-    if action == "support":
-        allowed = await run_in_thread(role_allowed, user_id, {"teacher"})
-        if not allowed:
-            await event.message.answer(
-                f"{EMOJI['lock']} Доступ ограничен\n"
-                f"Техподдержка доступна только для роли teacher"
-            )
-            return
-        flows[user_id] = FlowState(flow="support", step="category")
-        await event.message.answer(
-            f"{EMOJI['support']} Техподдержка\n"
-            f"{EMOJI['line'] * 15}\n\n"
-            f"FAQ:\n"
-            f"{EMOJI['wifi']} wifi — проблемы с Wi-Fi\n"
-            f"{EMOJI['journal']} journal — проблемы с электронным журналом\n"
-            f"{EMOJI['printer']} printer — проблемы с принтером\n\n"
-            f"{EMOJI['arrow_down']} Введите категорию: wifi / journal / printer / other"
-        )
-        return
-
-    if action == "help":
-        await event.message.answer(build_help_text(), keyboard=build_back_keyboard())
-        return
-
-    if action == "info":
-        await event.message.answer(build_info_text(), keyboard=build_back_keyboard())
-        return
-
-
-# ──── Обработчики команд (текстовые) ────
 
 @dispatcher.message_created(Command("register"))
 async def register_handler(event):
@@ -1334,10 +992,11 @@ async def profile_handler(event):
     if not user:
         await event.message.answer(
             f"{EMOJI['warning']} Профиль не найден\n"
-            f"Сначала пройдите регистрацию: /register"
+            f"Сначала пройдите регистрацию: /register",
+            keyboard=build_back_keyboard(),
         )
         return
-    await event.message.answer(build_profile_text(user))
+    await event.message.answer(build_profile_text(user), keyboard=build_back_keyboard())
 
 
 @dispatcher.message_created(Command("appointment"))
@@ -1360,7 +1019,14 @@ async def my_appointments_handler(event):
     user_id = event.message.sender.user_id
     logger.info("cmd_my_appointments user=%s", user_id)
     rows = await run_in_thread(list_user_appointments, user_id)
-    await event.message.answer(build_appointments_text(rows))
+    await event.message.answer(build_appointments_text(rows), keyboard=build_back_keyboard())
+
+
+@dispatcher.message_created(Command("news"))
+async def news_handler(event):
+    logger.info("cmd_news user=%s", event.message.sender.user_id)
+    rows = await run_in_thread(active_news)
+    await event.message.answer(build_news_text(rows), keyboard=build_back_keyboard())
 
 
 @dispatcher.message_created(Command("support"))
@@ -1383,28 +1049,6 @@ async def support_handler(event):
         f"{EMOJI['journal']} journal — проблемы с электронным журналом\n"
         f"{EMOJI['printer']} printer — проблемы с принтером\n\n"
         f"{EMOJI['arrow_down']} Введите категорию: wifi / journal / printer / other"
-    )
-
-
-@dispatcher.message_created(Command("news"))
-async def news_handler(event):
-    logger.info("cmd_news user=%s", event.message.sender.user_id)
-    rows = await run_in_thread(active_news)
-    await event.message.answer(build_news_text(rows))
-
-
-@dispatcher.message_created(Command("post_news"))
-async def post_news_handler(event):
-    user_id = event.message.sender.user_id
-    logger.info("cmd_post_news user=%s", user_id)
-    allowed = await run_in_thread(role_allowed, user_id, {"super_admin"})
-    if not allowed:
-        await event.message.answer(f"{EMOJI['lock']} Недостаточно прав")
-        return
-    flows[user_id] = FlowState(flow="news", step="title")
-    await event.message.answer(
-        f"{EMOJI['news']} Новая новость\n\n"
-        f"{EMOJI['name']} Введите заголовок новости:"
     )
 
 
@@ -1434,6 +1078,21 @@ async def schedule_handler(event):
     await event.message.answer("\n".join(lines))
 
 
+@dispatcher.message_created(Command("post_news"))
+async def post_news_handler(event):
+    user_id = event.message.sender.user_id
+    logger.info("cmd_post_news user=%s", user_id)
+    allowed = await run_in_thread(role_allowed, user_id, {"super_admin"})
+    if not allowed:
+        await event.message.answer(f"{EMOJI['lock']} Недостаточно прав")
+        return
+    flows[user_id] = FlowState(flow="news", step="title")
+    await event.message.answer(
+        f"{EMOJI['news']} Новая новость\n\n"
+        f"{EMOJI['name']} Введите заголовок новости:"
+    )
+
+
 @dispatcher.message_created(Command("cancel"))
 async def cancel_flow_handler(event):
     user_id = event.message.sender.user_id
@@ -1444,6 +1103,8 @@ async def cancel_flow_handler(event):
     else:
         await event.message.answer(f"{EMOJI['info']} Нет активного процесса для отмены.")
 
+
+# ──── Обработчик команд с аргументами (регистрируем до flow-обработчика!) ────
 
 @dispatcher.message_created()
 async def command_with_args_handler(event):
@@ -1499,7 +1160,7 @@ async def command_with_args_handler(event):
         return
 
 
-# ──── Flow-обработчик (пошаговые диалоги) ────
+# ──── Flow-обработчик (пошаговые диалоги) — регистрируем ПОСЛЕ всех командных обработчиков! ────
 
 @dispatcher.message_created(is_flow_message)
 async def flow_handler(event):
@@ -1543,7 +1204,8 @@ async def flow_handler(event):
             await run_in_thread(write_audit, user_id, "register", "user", str(user_id))
             await event.message.answer(
                 f"{EMOJI['sparkles']} Регистрация завершена!\n"
-                f"Добро пожаловать, {state.data['full_name']}!"
+                f"Добро пожаловать, {state.data['full_name']}!",
+                keyboard=build_main_menu_keyboard(),
             )
             return
 
@@ -1558,7 +1220,8 @@ async def flow_handler(event):
             await run_in_thread(write_audit, user_id, "register", "user", str(user_id))
             await event.message.answer(
                 f"{EMOJI['sparkles']} Регистрация завершена!\n"
-                f"Добро пожаловать, {state.data['full_name']}!"
+                f"Добро пожаловать, {state.data['full_name']}!",
+                keyboard=build_main_menu_keyboard(),
             )
             return
 
@@ -1585,7 +1248,8 @@ async def flow_handler(event):
                 f"{EMOJI['ticket']} Тикет создан!\n"
                 f"Номер: #{ticket_id}\n"
                 f"Категория: {state.data['category']}\n"
-                f"Статус: новый"
+                f"Статус: новый",
+                keyboard=build_main_menu_keyboard(),
             )
             return
 
@@ -1682,10 +1346,10 @@ async def flow_handler(event):
             return
 
         if state.step == "confirm":
-            # Сюда попадаем только если пользователь отправил текстом (например "YES")
             if text.upper() != "YES":
                 await event.message.answer(
-                    f"{EMOJI['cross']} Запись отменена. Чтобы начать заново, используйте /appointment"
+                    f"{EMOJI['cross']} Запись отменена. Чтобы начать заново, используйте /appointment",
+                    keyboard=build_main_menu_keyboard(),
                 )
                 flows.pop(user_id, None)
                 return
@@ -1700,17 +1364,355 @@ async def flow_handler(event):
             )
             flows.pop(user_id, None)
             if not ok:
-                await event.message.answer(f"{EMOJI['cross']} {result}")
+                await event.message.answer(f"{EMOJI['cross']} {result}", keyboard=build_main_menu_keyboard())
                 return
             await event.message.answer(
                 f"{EMOJI['sparkles']} Запись подтверждена!\n"
                 f"Номер записи: #{result}\n"
-                f"{EMOJI['staff']} Специалист будет ожидать вас в указанное время."
+                f"{EMOJI['staff']} Специалист будет ожидать вас в указанное время.",
+                keyboard=build_main_menu_keyboard(),
             )
             return
 
 
-# ──── Notification worker (фоновый) ────
+# ──── Главный обработчик меню (регистрируем ПЕРВЫМ, чтобы menu:* обрабатывались здесь) ────
+
+@dispatcher.callback_query_handler()
+async def menu_callback_handler(event):
+    payload = event.payload_text or ""
+    user_id = event.user_id
+
+    logger.debug("=== CALLBACK_RAW user=%s payload=%s ===", user_id, payload)
+
+    # Пропускаем flow-колбэки (их обработает flow_callback_handler вторым)
+    if not payload.startswith("menu:"):
+        logger.debug("callback_skip_not_menu user=%s payload=%s", user_id, payload)
+        return
+
+    msg_available = event.message is not None
+    logger.info(
+        "menu_callback user=%s payload=%s has_message=%s",
+        user_id, payload, msg_available,
+    )
+
+    action = payload.split(":", 1)[1]
+    logger.info("menu_callback_action user=%s action=%s", user_id, action)
+
+    # Без сообщения — отвечаем через answer(message={...})
+    if not msg_available:
+        logger.debug("menu_no_message user=%s action=%s", user_id, action)
+        await _handle_menu_no_message(event, user_id, action)
+        return
+
+    # С сообщением — подтверждаем и выполняем
+    try:
+        await event.answer()
+        logger.debug("callback_answered user=%s", user_id)
+    except Exception as exc:
+        logger.warning("callback_answer_failed user=%s err=%s", user_id, exc)
+
+    try:
+        await _execute_menu_action(event, user_id, action)
+    except Exception as exc:
+        logger.exception("menu_callback_action_failed user=%s action=%s err=%s", user_id, action, exc)
+        try:
+            await event.message.answer(f"{EMOJI['cross']} Произошла ошибка. Попробуй /start")
+        except Exception:
+            pass
+
+
+# ──── Колбэк для пошаговых диалогов (регистрируем ВТОРЫМ) ────
+
+@dispatcher.callback_query_handler()
+async def flow_callback_handler(event):
+    """Обрабатывает инлайн-колбэки пошаговых диалогов: svc:, staff:, slot:, confirm:."""
+    payload = event.payload_text or ""
+    user_id = event.user_id
+
+    # Пропускаем menu-колбэки
+    if not payload or payload.startswith("menu:"):
+        return
+
+    state = flows.get(user_id)
+    logger.info("flow_callback user=%s payload=%s has_flow=%s", user_id, payload, bool(state))
+
+    # Подтверждаем колбэк только для своих колбэков
+    flow_prefixes = ("svc:", "staff:", "slot:", "confirm:")
+    if not payload.startswith(flow_prefixes):
+        logger.debug("flow_callback_skip_not_ours user=%s payload=%s", user_id, payload)
+        return
+
+    logger.debug("flow_callback_ours user=%s payload=%s step=%s", user_id, payload, state.step if state else "no_state")
+
+    try:
+        if event.message is not None:
+            await event.answer()
+        else:
+            await event.answer(notification="")
+    except Exception as exc:
+        logger.warning("flow_callback_answer_failed user=%s err=%s", user_id, exc)
+
+    if payload.startswith("svc:") and state and state.flow == "appointment" and state.step == "service":
+        service_code = payload.split(":", 1)[1]
+        if service_code not in SERVICES:
+            await event.message.answer(f"{EMOJI['warning']} Неверная услуга.")
+            return
+        state.data["service"] = service_code
+        staff_rows = await run_in_thread(list_staff_for_service, service_code)
+        if not staff_rows:
+            await event.message.answer(f"{EMOJI['cross']} Нет специалистов для этой услуги.")
+            flows.pop(user_id, None)
+            return
+        state.data["staff_map"] = {str(i + 1): row["id"] for i, row in enumerate(staff_rows)}
+        state.step = "staff"
+        kb = build_staff_keyboard(staff_rows, state.data["staff_map"])
+        await event.message.answer(
+            f"{EMOJI['staff']} Выберите специалиста:",
+            keyboard=kb,
+        )
+        return
+
+    if payload.startswith("staff:") and state and state.flow == "appointment" and state.step == "staff":
+        idx = payload.split(":", 1)[1]
+        staff_id = state.data["staff_map"].get(idx)
+        if not staff_id:
+            await event.message.answer(f"{EMOJI['warning']} Выберите специалиста из списка.")
+            return
+        state.data["staff_id"] = staff_id
+        state.step = "date"
+        await event.message.answer(
+            f"{EMOJI['calendar']} Введите дату в формате YYYY-MM-DD\n"
+            f"Например: {datetime.now().strftime('%Y-%m-%d')}"
+        )
+        return
+
+    if payload.startswith("slot:") and state and state.flow == "appointment" and state.step == "time":
+        idx = payload.split(":", 1)[1]
+        slot = state.data["slots"].get(idx)
+        if not slot:
+            await event.message.answer(f"{EMOJI['warning']} Выберите время из списка.")
+            return
+        state.data["start_at"] = slot["start_at"]
+        state.data["end_at"] = slot["end_at"]
+        state.step = "purpose"
+        await event.message.answer(f"{EMOJI['name']} Опишите цель визита:")
+        return
+
+    if payload.startswith("confirm:") and state and state.flow == "appointment" and state.step == "confirm":
+        choice = payload.split(":", 1)[1]
+        if choice == "cancel":
+            flows.pop(user_id, None)
+            await event.message.answer(
+                f"{EMOJI['cross']} Запись отменена.",
+                keyboard=build_main_menu_keyboard(),
+            )
+            return
+        if choice == "yes":
+            ok, result = await run_in_thread(
+                create_appointment,
+                max_user_id=user_id,
+                service_code=state.data["service"],
+                staff_id=state.data["staff_id"],
+                start_at=state.data["start_at"],
+                end_at=state.data["end_at"],
+                purpose=state.data["purpose"],
+            )
+            flows.pop(user_id, None)
+            if not ok:
+                await event.message.answer(f"{EMOJI['cross']} {result}", keyboard=build_main_menu_keyboard())
+                return
+            await event.message.answer(
+                f"{EMOJI['sparkles']} Запись подтверждена!\n"
+                f"Номер записи: #{result}\n"
+                f"{EMOJI['staff']} Специалист будет ожидать вас в указанное время.",
+                keyboard=build_main_menu_keyboard(),
+            )
+            return
+
+
+async def _handle_menu_no_message(event, user_id: int, action: str):
+    """Обрабатывает menu: действия, когда event.message is None."""
+    logger.info("menu_no_message_start user=%s action=%s", user_id, action)
+    try:
+
+        if action == "back":
+            await event.answer(message={
+                "text": f"{EMOJI['school']} Главное меню\n{EMOJI['arrow_down']} Выберите действие:",
+                "keyboard": build_main_menu_keyboard(),
+            })
+            return
+
+        if action == "help":
+            await event.answer(message={"text": build_help_text(), "keyboard": build_back_keyboard()})
+            return
+
+        if action == "info":
+            await event.answer(message={"text": build_info_text(), "keyboard": build_back_keyboard()})
+            return
+
+        if action == "profile":
+            user = await run_in_thread(get_user, user_id)
+            if not user:
+                await event.answer(message={"text": f"{EMOJI['warning']} Профиль не найден\n/register"})
+                return
+            await event.answer(message={"text": build_profile_text(user), "keyboard": build_back_keyboard()})
+            return
+
+        if action == "news":
+            rows = await run_in_thread(active_news)
+            await event.answer(message={"text": build_news_text(rows), "keyboard": build_back_keyboard()})
+            return
+
+        if action == "my_appointments":
+            rows = await run_in_thread(list_user_appointments, user_id)
+            await event.answer(message={"text": build_appointments_text(rows), "keyboard": build_back_keyboard()})
+            return
+
+        if action == "register":
+            user = await run_in_thread(get_user, user_id)
+            flows[user_id] = FlowState(flow="register", step="phone", data={"role": user["role"] if user else DEFAULT_ROLE})
+            await event.answer(message={
+                "text": (
+                    f"{EMOJI['register']} Регистрация\n"
+                    f"{EMOJI['line'] * 12}\n\n"
+                    f"Введите номер телефона в формате {PHONE_MASK}.\n"
+                    f"Если не хотите указывать телефон — отправьте - (прочерк)."
+                )
+            })
+            return
+
+        if action == "appointment":
+            role = await run_in_thread(user_role, user_id)
+            if role == "guest":
+                await event.answer(message={
+                    "text": f"{EMOJI['warning']} Доступ ограничен\n/register"
+                })
+                return
+            flows[user_id] = FlowState(flow="appointment", step="service")
+            await event.answer(message={
+                "text": format_service_list(),
+                "keyboard": build_services_keyboard(),
+            })
+            return
+
+        if action == "support":
+            allowed = await run_in_thread(role_allowed, user_id, {"teacher"})
+            if not allowed:
+                await event.answer(message={
+                    "text": f"{EMOJI['lock']} Доступ ограничен\nТехподдержка только для teacher"
+                })
+                return
+            flows[user_id] = FlowState(flow="support", step="category")
+            await event.answer(message={
+                "text": (
+                    f"{EMOJI['support']} Техподдержка\n"
+                    f"{EMOJI['line'] * 15}\n\n"
+                    f"FAQ:\n"
+                    f"{EMOJI['wifi']} wifi\n"
+                    f"{EMOJI['journal']} journal\n"
+                    f"{EMOJI['printer']} printer\n\n"
+                    f"Введите категорию: wifi / journal / printer / other"
+                )
+            })
+            return
+
+        await event.answer(
+            notification=f"{EMOJI['warning']} Неизвестное действие. /start"
+        )
+
+    except Exception as exc:
+        logger.exception("menu_no_message_failed user=%s action=%s err=%s", user_id, action, exc)
+        try:
+            await event.answer(notification=f"{EMOJI['cross']} Ошибка. Попробуй /start")
+        except Exception:
+            pass
+
+
+async def _execute_menu_action(event, user_id: int, action: str):
+    """Выполняет действие меню, когда event.message доступен."""
+    logger.debug("execute_menu_action_start user=%s action=%s", user_id, action)
+    if action == "register":
+        user = await run_in_thread(get_user, user_id)
+        flows[user_id] = FlowState(flow="register", step="phone", data={"role": user["role"] if user else DEFAULT_ROLE})
+        await event.message.answer(
+            f"{EMOJI['register']} Регистрация\n"
+            f"{EMOJI['line'] * 12}\n\n"
+            f"Введите номер телефона в формате {PHONE_MASK}.\n"
+            f"Если не хотите указывать телефон — отправьте - (прочерк)."
+        )
+        return
+
+    if action == "profile":
+        user = await run_in_thread(get_user, user_id)
+        if not user:
+            await event.message.answer(
+                f"{EMOJI['warning']} Профиль не найден\n"
+                f"Сначала пройдите регистрацию: /register",
+                keyboard=build_back_keyboard(),
+            )
+            return
+        await event.message.answer(build_profile_text(user), keyboard=build_back_keyboard())
+        return
+
+    if action == "appointment":
+        role = await run_in_thread(user_role, user_id)
+        if role == "guest":
+            await event.message.answer(
+                f"{EMOJI['warning']} Доступ ограничен\n"
+                f"Сначала пройдите регистрацию: /register"
+            )
+            return
+        flows[user_id] = FlowState(flow="appointment", step="service")
+        await event.message.answer(format_service_list(), keyboard=build_services_keyboard())
+        return
+
+    if action == "my_appointments":
+        rows = await run_in_thread(list_user_appointments, user_id)
+        await event.message.answer(build_appointments_text(rows), keyboard=build_back_keyboard())
+        return
+
+    if action == "news":
+        rows = await run_in_thread(active_news)
+        await event.message.answer(build_news_text(rows), keyboard=build_back_keyboard())
+        return
+
+    if action == "support":
+        allowed = await run_in_thread(role_allowed, user_id, {"teacher"})
+        if not allowed:
+            await event.message.answer(
+                f"{EMOJI['lock']} Доступ ограничен\n"
+                f"Техподдержка доступна только для роли teacher"
+            )
+            return
+        flows[user_id] = FlowState(flow="support", step="category")
+        await event.message.answer(
+            f"{EMOJI['support']} Техподдержка\n"
+            f"{EMOJI['line'] * 15}\n\n"
+            f"FAQ:\n"
+            f"{EMOJI['wifi']} wifi — проблемы с Wi-Fi\n"
+            f"{EMOJI['journal']} journal — проблемы с электронным журналом\n"
+            f"{EMOJI['printer']} printer — проблемы с принтером\n\n"
+            f"{EMOJI['arrow_down']} Введите категорию: wifi / journal / printer / other"
+        )
+        return
+
+    if action == "help":
+        await event.message.answer(build_help_text(), keyboard=build_back_keyboard())
+        return
+
+    if action == "info":
+        await event.message.answer(build_info_text(), keyboard=build_back_keyboard())
+        return
+
+    if action == "back":
+        await event.message.answer(
+            f"{EMOJI['school']} Главное меню\n{EMOJI['arrow_down']} Выберите действие:",
+            keyboard=build_main_menu_keyboard(),
+        )
+        return
+
+
+# ──── Фоновый воркер уведомлений ────
 
 async def notification_worker():
     logger.info("notification_worker_started")
@@ -1719,7 +1721,7 @@ async def notification_worker():
             await process_due_notifications(bot)
         except Exception as exc:
             logger.exception("notification_worker_err=%s", exc)
-        await asyncio.sleep(60)  # проверка каждые 60 секунд
+        await asyncio.sleep(60)
 
 
 # ──── Точка входа ────
@@ -1727,11 +1729,7 @@ async def notification_worker():
 async def main():
     init_db()
     logger.info("db_initialized path=school_bot.db")
-
-    # Запускаем фоновый воркер уведомлений
     asyncio.create_task(notification_worker())
-
-    # Запускаем поллинг
     await dispatcher.run_polling(bot)
 
 
